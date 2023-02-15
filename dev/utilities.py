@@ -1,19 +1,28 @@
-import platform
 import os
 import time
-import paramiko
+import platform
 import socket
 import re
+import subprocess
+import shlex
 
 preset: dict[str, str] = None
 image_path: str = None
 volume: str = None
+mount_point: str = None
+boot_path: str = None
+hostname: str = None
 ssh = None
 sftp = None
 http = None
 default_user: bool = False
 
-host: platform.uname_result = platform.uname()
+host = platform.uname()
+if "darwin" in host.system.lower():
+    boot_path = "/Volumes/boot"
+if "linux" in host.system.lower():
+    login = os.getlogin()
+    boot_path = f"/run/media/{login}/boot"
 
 
 def _get_option(option: str, default = None):
@@ -151,6 +160,26 @@ def _require_preset(force = False):
         _new_preset()
 
 
+def get_hostname(raw: str):
+    if "darwin" in host.system.lower():
+        return raw + ".local"
+    if "linux" in host.system.lower():
+        cmd = shlex.split(f"avahi-resolve-host-name -4 {raw}.local")
+        proc = subprocess.Popen(cmd, stdout = subprocess.PIPE)
+        out, _ = proc.communicate()
+        return out.decode().split("\t")[1][:-1]
+
+
+def _require_hostname(force = False):
+    global hostname
+    if not force and hostname is not None: return
+    _require_preset()
+    if default_user:
+        hostname = get_hostname("raspberrypi")
+    else:
+        hostname = get_hostname(preset["HOSTNAME"])
+    
+
 def _require_image_path(force = False):
     global image_path
     if not force and image_path is not None: return
@@ -178,18 +207,32 @@ def _require_volume(force = False):
     if "darwin" in host.system.lower():
         os.system("diskutil list")
         print("I suppose you are on Mac OS. Above is the output of command \"diskutil list\".")
-        volume = _get_option("Which device is your SD card? (e.g. /dev/rdisk5, you might have to place the \"r\" in it) ")
+        volume = _get_option("Which disk is your SD card? (e.g. /dev/rdisk5, you might have to place the \"r\" in it) ")
 
     if "linux" in host.system.lower():
-        os.system("fdisk -l")
-        print("I suppose you are on Linux. Above is the output of command \"fdisk -l\".")
-        volume = _get_option("Which device is your SD card? ")
+        print("Listing available disks... (might ask for your password)\n")
+        os.system("sudo fdisk -l")
+        print("\nI suppose you are on Linux. Above is the output of command \"fdisk -l\".")
+        volume = _get_option("Which disk is your SD card? (e.g. /dev/sda) ")
+
+
+def _require_mount_point(force = False):
+    global mount_point
+    if not force and mount_point is not None: return
+
+    if "darwin" in host.system.lower():
+        mount_point = "/Volumes/boot"
+    if "linux" in host.system.lower():
+        _require_volume()
+        mount_point = volume
 
 
 def _require_ssh(force = False):
+    import paramiko
     global ssh
     if not force and ssh is not None: return
     _require_preset()
+    _require_hostname()
 
     try:
         ssh = paramiko.client.SSHClient()
@@ -197,14 +240,14 @@ def _require_ssh(force = False):
 
         if default_user:
             ssh.connect(
-                "raspberrypi.local", 
+                get_hostname("raspberrypi"), 
                 username = "pi", 
                 password = "raspberry",
                 look_for_keys = False
             )
         else:
             ssh.connect(
-                preset["HOSTNAME"] + ".local", 
+                hostname, 
                 username = preset["USERNAME"], 
                 password = preset["PASSWORD"],
                 look_for_keys = False
@@ -223,9 +266,11 @@ def _require_ssh(force = False):
 
 
 def _require_sftp(force = False):
+    import paramiko
     global sftp
     if not force and sftp is not None: return
     _require_preset()
+    _require_hostname()
 
     class SFTPClient(paramiko.SFTPClient):
         def put_dir(self, source, target):
@@ -251,11 +296,11 @@ def _require_sftp(force = False):
                     raise
     
     if default_user:
-        transport = paramiko.Transport(("raspberrypi.local", 22))
+        transport = paramiko.Transport((get_hostname("raspberrypi"), 22))
         transport.connect(username=preset["USERNAME"], password=preset["PASSWORD"])
         sftp = SFTPClient.from_transport(transport)
     else:
-        transport = paramiko.Transport((preset["HOSTNAME"] + ".local", 22))
+        transport = paramiko.Transport((hostname, 22))
         transport.connect(username=preset["USERNAME"], password=preset["PASSWORD"])
         sftp = SFTPClient.from_transport(transport)
 
@@ -321,9 +366,9 @@ Commands:
 
 
 def eject():
-    if "darwin" in host.system.lower():
-        print("Trying to unmount /Volumes/boot... (might ask for your password)")
-        os.system("sudo umount /Volumes/boot")
+    _require_mount_point()
+    print(f"Trying to unmount \"{mount_point}\"... (might ask for your password)")
+    os.system(f"sudo umount {mount_point}")
 
 
 def write_image():
@@ -340,7 +385,7 @@ def write_image():
     time.sleep(3)
 
     print(f"\nWriting image \"{image_path}\" to volume \"{volume}\"... (this will take a while)")
-    ec = os.system(f"sudo dd if={image_path} of={volume} bs=1m status=progress")
+    ec = os.system(f"sudo dd if={image_path} of={volume} status=progress")
     if ec != 0:
         print(
             "Writing image failed. The volume might still be mounted, be in read-only mode or may not exist.\n"
@@ -355,24 +400,22 @@ def write_image():
 
 def set_wlan():
     _require_preset()
-
-    if "darwin" in host.system.lower():
-        try:
-            print("Configuring WLAN connection \"%s\"..." % preset["WLAN_SSID"])
-            with open("/Volumes/boot/wpa_supplicant.conf", "w") as file:
-                print(
-                    "country=%s\n"
-                    "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n"
-                    "update_config=1\n"
-                    "network={\n"
-                    "    ssid=\"%s\"\n"
-                    "    scan_ssid=1\n"
-                    "    psk=\"%s\"\n"
-                    "    key_mgmt=WPA-PSK\n"
-                    "}\n" % (preset["WLAN_COUNTRY"], preset["WLAN_SSID"], preset["WLAN_PASSWORD"]), file = file
-                )
-        except FileNotFoundError:
-            print("File \"/Volumes/boot/wpa_supplicant.conf\" not found. Is the SD card mounted?")
+    print("Configuring WLAN connection \"%s\"..." % preset["WLAN_SSID"])
+    content =   "country=%s\n"\
+                "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n"\
+                "update_config=1\n"\
+                "network={\n"\
+                "    ssid=\"%s\"\n"\
+                "    scan_ssid=1\n"\
+                "    psk=\"%s\"\n"\
+                "    key_mgmt=WPA-PSK\n"\
+                "}\n" % (preset["WLAN_COUNTRY"], preset["WLAN_SSID"], preset["WLAN_PASSWORD"])
+    filename = f"{boot_path}/wpa_supplicant.conf"
+    try:
+        with open(filename, "w") as file:
+            print(content, file = file)
+    except FileNotFoundError:
+            print(f"File \"{filename}\" not found. Is the SD card mounted?")        
 
 
 def update():
@@ -387,11 +430,11 @@ def install_deps():
     _require_ssh()
     print("Installing dependencies...")
     _run_sudo("apt install python3-pip -y")
-    _run("pip install -r build/requirements.txt")
+    _run("pip install -r /build/requirements.txt")
 
 
 def install_dev_deps():
-    pass
+    os.system("python3 -m pip install -r requirements.txt")
 
 
 def build():
@@ -432,13 +475,16 @@ def configure_image():
 
     set_wlan()
 
-    if "darwin" in host.system.lower():
-            print("Creating default user...")
-            with open("/Volumes/boot/userconf.txt", "w") as file:
-                print("pi:$6$/4.VdYgDm7RJ0qM1$FwXCeQgDKkqrOU3RIRuDSKpauAbBvP11msq9X58c8Que2l1Dwq3vdJMgiZlQSbEXGaY5esVHGBNbCxKLVNqZW1", file = file)
+    user = "pi:$6$/4.VdYgDm7RJ0qM1$FwXCeQgDKkqrOU3RIRuDSKpauAbBvP11msq9X58c8Que2l1Dwq3vdJMgiZlQSbEXGaY5esVHGBNbCxKLVNqZW1"
+    try:
+        print("Creating default user...")
+        with open(f"{boot_path}/userconf.txt", "w") as file:
+            print(user, file = file)
 
-            print("Enabling SSH...")
-            open("/Volumes/boot/ssh", "w").close()
+        print("Enabling SSH...")
+        open(f"{boot_path}/ssh", "w").close()
+    except FileNotFoundError:
+        print(f"{boot_path} cannot be opened. Is the SD card mounted?")     
 
 
 def configure_ssh():
@@ -449,7 +495,7 @@ def configure_ssh():
     update()
 
     print("\nAdding user \"%s\"..." % preset["USERNAME"])
-    _run("true | sudo useradd -m -G pi,adm,dialout,cdrom,sudo,audio,video,plugdev,games,users,input,render,netdev,gpio,i2c,spi %s" % preset["USERNAME"])
+    _run("true | sudo useradd -M -G pi,adm,dialout,cdrom,sudo,audio,video,plugdev,games,users,input,render,netdev,gpio,i2c,spi %s" % preset["USERNAME"])
 
     print("\nSetting password...")
     _run_sudo("chpasswd", ("%s:%s\n" % (preset["USERNAME"], preset["PASSWORD"])))
@@ -462,6 +508,7 @@ def configure_ssh():
     _run_sudo("chmod -R 750 /build")
 
     _require_sftp(force = True)
+    print()
     clone()
 
     print("\nCreating service symlink...")
@@ -483,7 +530,6 @@ def configure_ssh():
     install_deps()
 
     time.sleep(5)
-    print("\nRebooting for changes to take effect...")
     reboot()
     print("After boot the board will be ready to use. Use \"ssh %s@%s.local\" to log in." % (preset["USERNAME"], preset["HOSTNAME"]))
 
@@ -508,4 +554,8 @@ def bootstrap():
 def ssh_session():
     _require_preset()
     _require_ssh()
-    os.system("ssh %s@%s" % (preset["USERNAME"], preset["HOSTNAME"] + ".local"))
+    _require_hostname()
+    if default_user:
+        os.system("ssh pi@%s" % get_hostname("raspberrypi"))
+    else:
+        os.system("ssh %s@%s" % (preset["USERNAME"], hostname))
