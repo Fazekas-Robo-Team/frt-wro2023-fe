@@ -1,0 +1,8 @@
+[Unit]
+Description=frt
+
+[Service]
+ExecStart=/usr/bin/make -C /build
+
+[Install]
+WantedBy=multi-user.target
