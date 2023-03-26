@@ -5,6 +5,8 @@ import socket
 import re
 import subprocess
 import shlex
+import shutil
+
 
 preset: dict[str, str] = None
 image_path: str = None
@@ -108,7 +110,7 @@ def _require_preset(force = False):
         if len(presets) == 0:
             raise RuntimeError()
         s = "s" if len(presets) > 1 else ""
-        print(f"I have found {len(presets)} preset{s} in ./presets.py.\n")
+        print(f"I have found {len(presets)} preset{s} in \"presets.py\".\n")
 
         keys = [key for key in presets]
         for i, key in enumerate(keys):
@@ -142,19 +144,19 @@ def _require_preset(force = False):
         _choose_preset()
     except ModuleNotFoundError:
         print(
-            "It looks like you do not have ./presets.py set up yet. " 
+            "It looks like you do not have \"presets.py\" set up yet. " 
             "We will create a new preset now.\n"
         )
         _new_preset()
     except ImportError:
         print(
-            "It looks like there are no presets in ./presets.py configured. " 
+            "It looks like there are no presets in \"presets.py\" configured. " 
             "We will create a new preset now.\n"
         )
         _new_preset()
     except RuntimeError:
         print(
-            "It looks like there are no presets in ./presets.py configured. " 
+            "It looks like there are no presets in \"presets.py\" configured. " 
             "We will create a new preset now.\n"
         )
         _new_preset()
@@ -239,6 +241,7 @@ def _require_ssh(force = False):
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         if default_user:
+            data = ("pi", get_hostname("raspberrypi"))
             ssh.connect(
                 get_hostname("raspberrypi"), 
                 username = "pi", 
@@ -246,6 +249,7 @@ def _require_ssh(force = False):
                 look_for_keys = False
             )
         else:
+            data = (preset["USERNAME"], hostname)
             ssh.connect(
                 hostname, 
                 username = preset["USERNAME"], 
@@ -254,7 +258,7 @@ def _require_ssh(force = False):
             )
 
     except socket.gaierror:
-        print("Could not resolve hostname, retrying in 5 seconds...")
+        print("Could not resolve hostname, retrying in 5 seconds... (%s@%s)" % data)
         time.sleep(5)
         ssh = None
         _require_ssh()
@@ -280,6 +284,7 @@ def _require_sftp(force = False):
             '''
             for item in os.listdir(source):
                 if os.path.isfile(os.path.join(source, item)):
+                    print(f"{os.path.join(source, item)} -> {target}/{item}")
                     self.put(os.path.join(source, item), '%s/%s' % (target, item))
                 else:
                     self.mkdir('%s/%s' % (target, item), ignore_existing=True)
@@ -294,6 +299,20 @@ def _require_sftp(force = False):
                     pass
                 else:
                     raise
+
+        def sync_dir(self, source, target):
+            remote = self.listdir(target)
+            for item in os.listdir(source):
+                if os.path.isfile(os.path.join(source, item)):
+                    src_path = os.path.join(source, item)
+                    dst_path = '%s/%s' % (target, item)
+                    if (not item in remote) or (self.stat(dst_path).st_mtime < os.stat(src_path).st_mtime):
+                        print(f"{src_path} -> {dst_path}")
+                        if (not item in remote): print("hi")
+                        self.put(src_path, dst_path)
+                else:
+                    self.mkdir('%s/%s' % (target, item), ignore_existing=True)
+                    self.sync_dir(os.path.join(source, item), '%s/%s' % (target, item))
     
     if default_user:
         transport = paramiko.Transport((get_hostname("raspberrypi"), 22))
@@ -316,6 +335,7 @@ def _run(command: str, write: str = None):
     stdin, stdout, stderr = ssh.exec_command(command)
     if write is not None:
         stdin.write(write.encode())
+    time.sleep(1)
     stdin.close()
     while line := stdout.readline(): print(line, end = "")
     while line := stderr.readline(): print(line, end = "")
@@ -324,9 +344,11 @@ def _run(command: str, write: str = None):
 def _run_sudo(command: str, write: str = None):
     _require_ssh()
     stdin, stdout, stderr = ssh.exec_command("sudo -S -p '' " + command)
-    stdin.write(preset["PASSWORD"] + "\n")
+    if not default_user:
+        stdin.write(preset["PASSWORD"] + "\n")
     if write is not None:
         stdin.write(write.encode())
+    time.sleep(1)
     stdin.close()
     while line := stdout.readline(): print(line, end = "")
     while line := stderr.readline(): print(line, end = "")
@@ -346,6 +368,7 @@ Options:
 
 Commands:
     help                Displays this message
+    repl                Starts a development shell with file watching
     bootstrap           Performs a clean installation interactively
     ssh                 Starts a remote shell session
     build               Builds the project on the host
@@ -356,6 +379,7 @@ Commands:
     update              Updates the packages on the board
     eject               Ejects the SD card from the host
     set-wlan            Configures WLAN on the SD card in the host 
+    journal             Display daemon logs
 
     write-image         Writes a system image to the SD card in the host
     install-deps        Installs depencencies on the board
@@ -385,7 +409,7 @@ def write_image():
     time.sleep(3)
 
     print(f"\nWriting image \"{image_path}\" to volume \"{volume}\"... (this will take a while)")
-    ec = os.system(f"sudo dd if={image_path} of={volume} status=progress")
+    ec = os.system(f"sudo dd if={image_path} of={volume} bs=65536 status=progress")
     if ec != 0:
         print(
             "Writing image failed. The volume might still be mounted, be in read-only mode or may not exist.\n"
@@ -429,26 +453,72 @@ def update():
 def install_deps():
     _require_ssh()
     print("Installing dependencies...")
+    _run_sudo("sh -c 'curl -fsSL https://deb.nodesource.com/setup_16.x | bash -'")
+    _run_sudo("apt install nodejs -y")
     _run_sudo("apt install python3-pip -y")
-    _run("pip install -r /build/requirements.txt")
+    _run_sudo("pip install -r /build/requirements.txt")
+    _run_sudo("npm --prefix /build/gui install /build/gui")
 
 
 def install_dev_deps():
-    os.system("python3 -m pip install -r requirements.txt")
+    os.system("python -m pip install -r requirements.txt")
+
+
+def _copydir(source, target):
+    rules = []
+    try:
+        with open(os.path.join(source, ".buildfile")) as file:
+            for line in file.readlines():
+                try:
+                    line = line.strip()
+                    if line != "":
+                        rules.append(re.compile(line))
+                except re.error as e:
+                    import traceback
+                    traceback.print_exception(type(e), e, e.__traceback__)
+    except FileNotFoundError:
+        rules.append(re.compile("^((?![.]buildfile).)*$"))
+
+    for item in os.listdir(source):
+        src_path = os.path.join(source, item)
+        dst_path = '%s/%s' % (target, item)
+
+        for rule in rules:
+            if rule.search(src_path) is not None:
+                break
+        else:
+            continue
+
+        if os.path.isfile(src_path):
+            if (not os.path.isfile(dst_path)) or os.stat(dst_path).st_mtime < os.stat(src_path).st_mtime:
+                print(f"{src_path} -> {dst_path}")
+                shutil.copy(src_path, dst_path)
+        else:
+            try:
+                os.mkdir(dst_path)
+            except FileExistsError:
+                pass
+            _copydir(src_path, dst_path)
 
 
 def build():
-    pass
+    print("Building project...")
+    try:
+        os.mkdir("build")
+    except FileExistsError:
+        pass
+    _copydir("src", "build")
+    #os.system("make build")
 
 
 def clone():
     _require_ssh()
     _require_sftp()
     try:
-        print("Cloning \"./build\" directory to remote \"/build\"...")
-        sftp.put_dir("./build", "/build")
+        print("Cloning \"build\" directory to remote \"/build\"...")
+        sftp.sync_dir("build", "/build")
     except PermissionError:
-        print("Permission error. This usually happens when there are \"__pycache__\" directories somewhere in \"./build.\"")
+        print("Permission error. This usually happens when there are \"__pycache__\" directories somewhere in \"build\".")
         exit(-1)
 
 
@@ -467,6 +537,7 @@ def reboot():
 def restart():
     _require_ssh()
     print("Restarting daemon...")
+    _run_sudo("systemctl daemon-reload")
     _run_sudo("systemctl restart frt")
 
 
@@ -498,31 +569,36 @@ def configure_ssh():
     _run("true | sudo useradd -M -G pi,adm,dialout,cdrom,sudo,audio,video,plugdev,games,users,input,render,netdev,gpio,i2c,spi %s" % preset["USERNAME"])
 
     print("\nSetting password...")
-    _run_sudo("chpasswd", ("%s:%s\n" % (preset["USERNAME"], preset["PASSWORD"])))
+    _run("sudo chpasswd", ("%s:%s\n" % (preset["USERNAME"], preset["PASSWORD"])))
 
     print("\nCreating directory /build...")
-    _run_sudo("mkdir /build")
+    _run("sudo mkdir /build")
 
     print("\nSetting permissions...")
-    _run_sudo("chown -R %s /build" % preset["USERNAME"])
-    _run_sudo("chmod -R 750 /build")
+    _run("sudo chown -R %s /build" % preset["USERNAME"])
+    _run("sudo chmod -R 750 /build")
 
     _require_sftp(force = True)
     print()
     clone()
 
     print("\nCreating service symlink...")
-    _run_sudo("ln -s /build/frt.service /etc/systemd/system/frt.service")
+    _run("sudo ln -s /build/frt.service /etc/systemd/system/frt.service")
 
     print("\nEnabling service...")
-    _run_sudo("systemctl daemon-reload")
-    _run_sudo("systemctl enable frt")
+    _run("sudo systemctl daemon-reload")
+    _run("sudo systemctl enable frt")
 
     print("\nSetting hostname to \"%s\"..." % preset["HOSTNAME"])
-    _run_sudo("hostnamectl set-hostname %s" % preset["HOSTNAME"])
+    _run("sudo hostnamectl set-hostname %s" % preset["HOSTNAME"])
 
     print("\nDisabling login on default account...")
-    _run_sudo("usermod pi -s /sbin/nologin")
+    _run("sudo usermod pi -s /sbin/nologin")
+
+    global hostname
+    save = "".join(hostname)
+
+    hostname = "raspberrypi.local"
 
     default_user = False
     _require_ssh(force = True)
@@ -531,7 +607,9 @@ def configure_ssh():
 
     time.sleep(5)
     reboot()
-    print("After boot the board will be ready to use. Use \"ssh %s@%s.local\" to log in." % (preset["USERNAME"], preset["HOSTNAME"]))
+
+    hostname = save
+    print("After boot the board will be ready to use. Use \"ssh %s@%s\" to log in." % (preset["USERNAME"], save))
 
     ssh = None
     sftp = None
@@ -559,3 +637,125 @@ def ssh_session():
         os.system("ssh pi@%s" % get_hostname("raspberrypi"))
     else:
         os.system("ssh %s@%s" % (preset["USERNAME"], hostname))
+
+
+class CommandException(Exception):
+    pass
+
+
+def repl():
+    _require_preset()
+
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler, FileSystemEvent
+
+    class EventHandler(FileSystemEventHandler):
+        def on_any_event(self, event: FileSystemEvent):
+            if not event.is_directory:
+                print(f"\n{event.src_path} changed...\n")
+                build()
+                print()
+                clone()
+                print(">>> ", end = "", flush = True) # new prompt
+
+    observer = Observer()
+    handler = EventHandler()
+    observer.schedule(handler, "src", recursive=True)
+    observer.start()
+
+    try:
+        while True:
+            args = input(">>> ").split()
+            try:
+                process_cli(args)
+            except CommandException:
+                print("Invalid command. Type \"help\" for more information.")
+    except Exception as e:
+        import traceback
+        traceback.print_exception(type(e), e, e.__traceback__)
+    finally:
+        observer.stop()
+        observer.join()
+
+
+def journal():
+    _run("journalctl --no-pager -n 20 -u frt")
+
+
+def process_cli(argv: list[str]):
+    commands = []
+
+    functions = {
+        "help": help,
+        "repl": repl,
+        "eject": eject,
+        "write-image": write_image,
+        "set-wlan": set_wlan,
+        "update": update,
+        "install-deps": install_deps,
+        "install-dev-deps": install_dev_deps,
+        "build": build,
+        "clone": clone,
+        "shutdown": shutdown,
+        "reboot": reboot,
+        "restart": restart,
+        "configure-image": configure_image,
+        "configure-ssh": configure_ssh,
+        "bootstrap": bootstrap,
+        "ssh": ssh_session,
+        "journal": journal
+    }
+
+    try:
+        i = 0
+        while i < len(argv):
+            arg = argv[i]
+            if arg[0] == "-" and arg[1] == "-":
+                option = arg[2:]
+            elif arg[0] == "-": 
+                option = arg[1]
+            else:
+                break
+
+            if option == "p" or option == "preset":
+                i += 1
+                try:
+                    from presets import presets
+                    global preset
+                    preset = presets[argv[i]]
+                except:
+                    print("Could not find such preset in \"presets.py\".")
+
+            elif option == "v" or option == "volume":
+                i += 1
+                global volume
+                volume = argv[i]
+
+            elif option == "i" or option == "image-path":
+                i += 1
+                global image_path
+                image_path = argv[i]
+
+            elif option == "u" or option == "use-default-user":
+                global default_user
+                default_user = True
+
+            else: raise
+            i += 1
+
+        while i < len(argv):
+            commands.append(argv[i])
+            i += 1
+
+    except:
+        raise CommandException
+
+    if len(commands) < 1:
+        raise CommandException
+    else:
+        for command in commands:
+            try:
+                f = functions[command]
+            except:
+                raise CommandException
+            f()
