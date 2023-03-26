@@ -2,7 +2,6 @@
 **/.vscode
 **/.env
 **/.DS_Store
-**/build
 **/node_modules
 raspberryos.img
 presets.py
