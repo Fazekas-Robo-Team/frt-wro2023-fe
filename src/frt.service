@@ -2,7 +2,7 @@
 Description=frt
 
 [Service]
-ExecStart=/usr/bin/make -C /build
+ExecStart=/usr/bin/make -j2 -C /build
 
 [Install]
 WantedBy=multi-user.target

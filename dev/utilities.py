@@ -169,7 +169,26 @@ def get_hostname(raw: str):
         cmd = shlex.split(f"avahi-resolve-host-name -4 {raw}.local")
         proc = subprocess.Popen(cmd, stdout = subprocess.PIPE)
         out, _ = proc.communicate()
-        return out.decode().split("\t")[1][:-1]
+        try:
+            return out.decode().split("\t")[1][:-1]
+        except IndexError:
+            input(
+                f"Command \"avahi-resolve-host-name -4 {raw}.local\" failed, is avahi-daemon running?\n"
+                "Check it and press enter to try again.\n"
+                "\n"
+                "To enable it on OpenRC systems:\n"
+                "sudo rc-update add avahi-daemon default\n"
+                "\n"
+                "To start it on OpenRC systems:\n"
+                "sudo rc-service avahi-daemon start\n"
+                "\n"
+                "To enable it on systemd systems:\n"
+                "sudo systemctl enable avahi-daemon.service\n"
+                "\n"
+                "To start it on systemd systems:\n"
+                "sudo systemctl start avahi-daemon.service\n"
+            )
+            return get_hostname(raw)
 
 
 def _require_hostname(force = False):
@@ -308,7 +327,6 @@ def _require_sftp(force = False):
                     dst_path = '%s/%s' % (target, item)
                     if (not item in remote) or (self.stat(dst_path).st_mtime < os.stat(src_path).st_mtime):
                         print(f"{src_path} -> {dst_path}")
-                        if (not item in remote): print("hi")
                         self.put(src_path, dst_path)
                 else:
                     self.mkdir('%s/%s' % (target, item), ignore_existing=True)
@@ -379,7 +397,8 @@ Commands:
     update              Updates the packages on the board
     eject               Ejects the SD card from the host
     set-wlan            Configures WLAN on the SD card in the host 
-    journal             Display daemon logs
+    logs                Display daemon logs
+    hostname            Print hostname or IP of the board
 
     write-image         Writes a system image to the SD card in the host
     install-deps        Installs depencencies on the board
@@ -456,18 +475,25 @@ def install_deps():
     _run_sudo("sh -c 'curl -fsSL https://deb.nodesource.com/setup_16.x | bash -'")
     _run_sudo("apt install nodejs -y")
     _run_sudo("apt install python3-pip -y")
+
+    # computer vision deps
+    _run_sudo("apt install -y python3-picamera2 --no-install-recommends")
+    _run_sudo("apt install -y python3-opencv opencv-data")
+
     _run_sudo("pip install -r /build/requirements.txt")
     _run_sudo("npm --prefix /build/gui install /build/gui")
 
 
 def install_dev_deps():
-    os.system("python -m pip install -r requirements.txt")
+    os.system("python -m pip install -r dev/requirements.txt")
+    os.system("python -m pip install -r src/requirements.txt")
+    os.system("npm --prefix src/gui install")
 
 
 def _copydir(source, target):
     rules = []
     try:
-        with open(os.path.join(source, ".buildfile")) as file:
+        with open(os.path.join(source, ".buildignore")) as file:
             for line in file.readlines():
                 try:
                     line = line.strip()
@@ -477,17 +503,20 @@ def _copydir(source, target):
                     import traceback
                     traceback.print_exception(type(e), e, e.__traceback__)
     except FileNotFoundError:
-        rules.append(re.compile("^((?![.]buildfile).)*$"))
+        pass
+
+    rules.append(re.compile("buildignore"))
 
     for item in os.listdir(source):
         src_path = os.path.join(source, item)
         dst_path = '%s/%s' % (target, item)
 
+        match = False
         for rule in rules:
             if rule.search(src_path) is not None:
+                match = True
                 break
-        else:
-            continue
+        if match: continue
 
         if os.path.isfile(src_path):
             if (not os.path.isfile(dst_path)) or os.stat(dst_path).st_mtime < os.stat(src_path).st_mtime:
@@ -650,9 +679,9 @@ def repl():
     from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
     class EventHandler(FileSystemEventHandler):
-        def on_any_event(self, event: FileSystemEvent):
+        def on_modified(self, event: FileSystemEvent):
             if not event.is_directory:
-                print(f"\n{event.src_path} changed...\n")
+                print(f"\n{event.src_path} modified...\n")
                 build()
                 print()
                 clone()
@@ -660,7 +689,7 @@ def repl():
 
     observer = Observer()
     handler = EventHandler()
-    observer.schedule(handler, "src", recursive=True)
+    observer.schedule(handler, "./src", recursive=True)
     observer.start()
 
     try:
@@ -678,8 +707,13 @@ def repl():
         observer.join()
 
 
-def journal():
+def logs():
     _run("journalctl --no-pager -n 20 -u frt")
+
+
+def print_hostname():
+    _require_hostname()
+    print(hostname)
 
 
 def process_cli(argv: list[str]):
@@ -703,7 +737,8 @@ def process_cli(argv: list[str]):
         "configure-ssh": configure_ssh,
         "bootstrap": bootstrap,
         "ssh": ssh_session,
-        "journal": journal
+        "logs": logs,
+        "hostname": print_hostname
     }
 
     try:

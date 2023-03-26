@@ -7,7 +7,7 @@ service: api gui
 
 .PHONY: api
 api:
-	uvicorn main:api --host 0.0.0.0 --port 8000 --reload
+	uvicorn api.main:api --host 0.0.0.0 --port 8000 --reload
 
 .PHONY: gui
 gui:

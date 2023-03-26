@@ -3,5 +3,8 @@
 **/.env
 **/.DS_Store
 **/node_modules
+**/build
+**/.build
 raspberryos.img
 presets.py
+config.mk
