@@ -1,0 +1,24 @@
+/* github dark color scheme */
+body {
+    background-color: #333441;
+    color: #c8c8c8;
+    font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji;
+    font-size: 14px;
+    line-height: 1.5;
+    margin: 0;
+    padding: 6px;
+    height: 100%;
+}
+
+.content {
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    height: 100%;
+}
+
+.wrapper {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}

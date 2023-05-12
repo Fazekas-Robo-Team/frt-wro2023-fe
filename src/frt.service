@@ -3,6 +3,8 @@ Description=frt
 
 [Service]
 ExecStart=/usr/bin/make -j2 -C /build
+ExecReload=/bin/kill -s HUP $MAINPID
+ExecStop=/bin/kill -s QUIT $MAINPID
 
 [Install]
 WantedBy=multi-user.target
