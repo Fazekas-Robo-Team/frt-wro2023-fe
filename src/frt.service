@@ -2,7 +2,7 @@
 Description=frt
 
 [Service]
-ExecStart=/usr/bin/make -j2 -C /build
+ExecStart=/usr/bin/make -j2 -C /build service
 ExecReload=/bin/kill -s HUP $MAINPID
 ExecStop=/bin/kill -s QUIT $MAINPID
 

@@ -121,7 +121,9 @@ def apply_settings ():
         },
         controls = {
             "FrameRate": Config.framerate,
-        }
+        },
+        #buffer_count = 3,
+        #queue = False,
     )
     cam.align_configuration(config)
     cam.configure(config)

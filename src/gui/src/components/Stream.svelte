@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { ws_url } from '../globals.js';
+    import { subscribe } from 'svelte/internal';
 
     export let name: string;
     export let path: string;
@@ -13,7 +14,7 @@
 
     function startBuffering () {
         timeout = setTimeout(() => {
-            interval = setInterval(updateUrl, 1000 / 120);
+            interval = setInterval(updateUrl, 0);
         }, 0);
     }
 
@@ -28,7 +29,15 @@
         }
     }
 
-    onMount(() => {
+    let subscribed = false;
+
+    function connectStream () {
+
+        if (!subscribed) {
+            subscribed = true;
+            ws_url.subscribe(connectStream);
+        }
+
         let socket: WebSocket = new WebSocket($ws_url + '/stream' + path);
 
         socket.onmessage = event => {
@@ -44,7 +53,9 @@
         };
 
         startBuffering();
-    });
+    }
+
+    onMount(connectStream);
     
 </script>
 
